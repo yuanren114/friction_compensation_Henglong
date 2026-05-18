@@ -1,0 +1,27 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local environment / editor noise
+.DS_Store
+Thumbs.db
+
+# Simulink / MATLAB generated cache
+slprj/
+*.slxc
+
+# Generated outputs and experiment artifacts
+outputs/
+*.png
+*.csv
+*_summary.json
+*_loss_history.csv
+
+# # Keep source data / models by default
+# !SWA.XLS
+# !matlab.mat
+# !FrictionCompensation_Development_2024a.slx
+
+*.pptx
+*.mat
+*.XLS
