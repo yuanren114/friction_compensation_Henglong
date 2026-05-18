@@ -91,7 +91,7 @@ Use this when you want to avoid CUDA and force CPU execution.
 This is a full explicit command with the current script defaults written out:
 
 ```bash
-python friction_estimator.py --data SWA.XLS --mode both --angle-unit deg --time-col "t[s]" --torque-col "API_2ms.HwTrq_Nm_s16p10[]" --angle-col "API_2ms.HwAng_Deg_s32p16[]" --omega-col "API_2ms.HwAngVel_Degs_s32p16[]" --motor-input-col "AimiCurrent[]" --omega-source measured --derivative-filter-time 0.1 --J-nominal 0.01275 --B-init 0.0 --use-B --learn-J --learn-B --epochs 3000 --lr 1e-3 --w-dyn 1.0 --w-smooth 0.1 --w-spike 0.1 --w-sym 0.1 --w-J 1.0 --w-B 0.01 --device cuda
+python friction_estimator.py --data SWA.XLS --mode both --angle-unit deg --time-col "t[s]" --torque-col "API_2ms.HwTrq_Nm_s16p10[]" --angle-col "API_2ms.HwAng_Deg_s32p16[]" --omega-col "API_2ms.HwAngVel_Degs_s32p16[]" --motor-input-col "AimiCurrent[]" --omega-source measured --derivative-filter-time 0.1 --J-nominal 0.01275 --B-init 0.0 --init-F0 1.0 --init-A 0.05 --init-v0 0.5 --init-C1 0.01 --init-omega-eps 0.05 --use-B --learn-J --learn-B --epochs 3000 --lr 1e-3 --w-dyn 1.0 --w-smooth 0.1 --w-spike 0.1 --w-sym 0.1 --w-J 1.0 --w-B 0.01 --device cuda
 ```
 
 Notes:
@@ -380,6 +380,56 @@ Default:
 
 ```bash
 --B-init 0.0
+```
+
+### `--init-F0`
+
+Initial value for the base friction level `F0` in the analytic law.
+
+Default:
+
+```bash
+--init-F0 1.0
+```
+
+### `--init-A`
+
+Initial value for the low-speed transition amplitude `A`.
+
+Default:
+
+```bash
+--init-A 0.05
+```
+
+### `--init-v0`
+
+Initial value for the low-speed exponential transition scale `v0`.
+
+Default:
+
+```bash
+--init-v0 0.5
+```
+
+### `--init-C1`
+
+Initial value for the linear speed-growth coefficient `C1`.
+
+Default:
+
+```bash
+--init-C1 0.01
+```
+
+### `--init-omega-eps`
+
+Initial value for the smooth sign transition scale `omega_eps`.
+
+Default:
+
+```bash
+--init-omega-eps 0.05
 ```
 
 ### `--use-B`

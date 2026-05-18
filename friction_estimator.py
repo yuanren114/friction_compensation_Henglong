@@ -23,7 +23,30 @@ DEFAULT_TORQUE_COL = "API_2ms.HwTrq_Nm_s16p10[]"
 DEFAULT_ANGLE_COL = "API_2ms.HwAng_Deg_s32p16[]"
 DEFAULT_OMEGA_COL = "API_2ms.HwAngVel_Degs_s32p16[]"
 DEFAULT_MOTOR_INPUT_COL = "AimiCurrent[]"
+
+# Default derivative block configuration used by this script.
 FIXED_FILTER_TS = 0.1
+
+# Default model / optimization configuration.
+DEFAULT_DERIVATIVE_FILTER_TIME = 0.1
+DEFAULT_J_NOMINAL = 0.01275
+DEFAULT_B_INIT = 0.0
+DEFAULT_EPOCHS = 3000
+DEFAULT_LR = 1e-3
+DEFAULT_W_DYN = 1.0
+DEFAULT_W_SMOOTH = 0.1
+DEFAULT_W_SPIKE = 0.1
+DEFAULT_W_SYM = 0.1
+DEFAULT_W_J = 1.0
+DEFAULT_W_B = 0.01
+
+# Default analytic friction-law initialization.
+# F_fric(omega) = tanh(omega / omega_eps) * (F0 + A * (1 - exp(-|omega| / v0)) + C1 * |omega|)
+DEFAULT_INIT_F0 = 1.0
+DEFAULT_INIT_A = 0.05
+DEFAULT_INIT_V0 = 0.50
+DEFAULT_INIT_C1 = 0.01
+DEFAULT_INIT_OMEGA_EPS = 0.05
 
 
 def ensure_parent_dir(path):
@@ -50,6 +73,11 @@ def sanitize_run_name(name):
             safe.append("_")
     out = "".join(safe).strip("._")
     return out or "run"
+
+
+def inverse_softplus(y):
+    y = float(max(y, 1e-9))
+    return math.log(math.exp(y) - 1.0)
 
 
 def build_default_run_name(args):
@@ -382,15 +410,15 @@ def build_speed_bins(abs_omega, num_bins=25):
 
 
 class FrictionMagnitudeModel(nn.Module):
-    def __init__(self, max_abs_omega):
+    def __init__(self, max_abs_omega, init_F0, init_A, init_v0, init_C1):
         super().__init__()
         self.max_abs_omega = float(max(max_abs_omega, 1e-3))
         # Analytic magnitude law:
         # F_abs(|omega|) = F0 + A * (1 - exp(-|omega| / v0)) + C1 * |omega|
-        self.raw_F0 = nn.Parameter(torch.tensor(math.log(math.exp(1.00) - 1.0)))
-        self.raw_A = nn.Parameter(torch.tensor(math.log(math.exp(0.05) - 1.0)))
-        self.raw_v0 = nn.Parameter(torch.tensor(math.log(math.exp(0.50) - 1.0)))
-        self.raw_C1 = nn.Parameter(torch.tensor(math.log(math.exp(0.01) - 1.0)))
+        self.raw_F0 = nn.Parameter(torch.tensor(inverse_softplus(init_F0)))
+        self.raw_A = nn.Parameter(torch.tensor(inverse_softplus(init_A)))
+        self.raw_v0 = nn.Parameter(torch.tensor(inverse_softplus(init_v0)))
+        self.raw_C1 = nn.Parameter(torch.tensor(inverse_softplus(init_C1)))
 
     def forward(self, abs_omega):
         F0 = F.softplus(self.raw_F0)
@@ -422,6 +450,11 @@ class FrictionEstimator(nn.Module):
         J_nominal,
         max_abs_omega,
         B_init=0.0,
+        init_F0=DEFAULT_INIT_F0,
+        init_A=DEFAULT_INIT_A,
+        init_v0=DEFAULT_INIT_V0,
+        init_C1=DEFAULT_INIT_C1,
+        init_omega_eps=DEFAULT_INIT_OMEGA_EPS,
         learn_J=True,
         learn_B=True,
         use_B=True,
@@ -437,8 +470,14 @@ class FrictionEstimator(nn.Module):
         self.use_B = bool(use_B)
         self.raw_scale = nn.Parameter(torch.tensor(0.0))
         self.raw_B = nn.Parameter(torch.tensor(float(B_init)))
-        self.raw_omega_eps = nn.Parameter(torch.tensor(math.log(math.exp(0.05) - 1.0)))
-        self.friction_model = FrictionMagnitudeModel(max_abs_omega=max_abs_omega)
+        self.raw_omega_eps = nn.Parameter(torch.tensor(inverse_softplus(init_omega_eps)))
+        self.friction_model = FrictionMagnitudeModel(
+            max_abs_omega=max_abs_omega,
+            init_F0=init_F0,
+            init_A=init_A,
+            init_v0=init_v0,
+            init_C1=init_C1,
+        )
 
     def J_scale(self):
         scale01 = torch.sigmoid(self.raw_scale)
@@ -512,6 +551,11 @@ def optimize_friction_pytorch(prepared, args):
         J_nominal=args.J_nominal,
         max_abs_omega=max_abs_omega,
         B_init=args.B_init,
+        init_F0=args.init_F0,
+        init_A=args.init_A,
+        init_v0=args.init_v0,
+        init_C1=args.init_C1,
+        init_omega_eps=args.init_omega_eps,
         learn_J=args.learn_J,
         learn_B=args.learn_B,
         use_B=args.use_B,
@@ -708,6 +752,13 @@ def save_results(prepared, friction_raw, friction_direct_smoothed, learned, args
         "time_step_estimated_from_data": prepared["dt_est"],
         "derivative_filter_time": args.derivative_filter_time,
         "J_nominal": args.J_nominal,
+        "analytic_initialization": {
+            "init_F0": args.init_F0,
+            "init_A": args.init_A,
+            "init_v0": args.init_v0,
+            "init_C1": args.init_C1,
+            "init_omega_eps": args.init_omega_eps,
+        },
         "J_learned": learned["J_learned"],
         "J_scale": learned["J_scale"],
         "B_learned": learned["B_learned"],
@@ -968,20 +1019,25 @@ def build_parser():
     parser.add_argument("--omega-col", type=str, default=DEFAULT_OMEGA_COL)
     parser.add_argument("--motor-input-col", type=str, default=DEFAULT_MOTOR_INPUT_COL)
     parser.add_argument("--omega-source", choices=["measured", "angle"], default="measured")
-    parser.add_argument("--derivative-filter-time", type=float, default=0.1)
-    parser.add_argument("--J-nominal", type=float, default=0.01275)
-    parser.add_argument("--B-init", type=float, default=0.0)
+    parser.add_argument("--derivative-filter-time", type=float, default=DEFAULT_DERIVATIVE_FILTER_TIME)
+    parser.add_argument("--J-nominal", type=float, default=DEFAULT_J_NOMINAL)
+    parser.add_argument("--B-init", type=float, default=DEFAULT_B_INIT)
+    parser.add_argument("--init-F0", dest="init_F0", type=float, default=DEFAULT_INIT_F0)
+    parser.add_argument("--init-A", dest="init_A", type=float, default=DEFAULT_INIT_A)
+    parser.add_argument("--init-v0", dest="init_v0", type=float, default=DEFAULT_INIT_V0)
+    parser.add_argument("--init-C1", dest="init_C1", type=float, default=DEFAULT_INIT_C1)
+    parser.add_argument("--init-omega-eps", dest="init_omega_eps", type=float, default=DEFAULT_INIT_OMEGA_EPS)
     parser.add_argument("--use-B", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--learn-J", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--learn-B", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--epochs", type=int, default=3000)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--w-dyn", type=float, default=1.0)
-    parser.add_argument("--w-smooth", type=float, default=0.1)
-    parser.add_argument("--w-spike", type=float, default=0.1)
-    parser.add_argument("--w-sym", type=float, default=0.1)
-    parser.add_argument("--w-J", type=float, default=1.0)
-    parser.add_argument("--w-B", type=float, default=0.01)
+    parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
+    parser.add_argument("--lr", type=float, default=DEFAULT_LR)
+    parser.add_argument("--w-dyn", type=float, default=DEFAULT_W_DYN)
+    parser.add_argument("--w-smooth", type=float, default=DEFAULT_W_SMOOTH)
+    parser.add_argument("--w-spike", type=float, default=DEFAULT_W_SPIKE)
+    parser.add_argument("--w-sym", type=float, default=DEFAULT_W_SYM)
+    parser.add_argument("--w-J", type=float, default=DEFAULT_W_J)
+    parser.add_argument("--w-B", type=float, default=DEFAULT_W_B)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--plot-dir", type=str, default=None)
