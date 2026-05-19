@@ -462,3 +462,111 @@ Once that behaves well:
 - then consider `A`
 
 Avoid making all parameters adaptive in the first version.
+
+## Replay One XLS in Simulink With Manual `Ts`
+
+If the goal is:
+
+- choose one `XLS`
+- feed its logged signals into the Simulink model
+- manually choose the derivative-block `Ts`
+- observe `F0_live`, `residual`, `friction_hat`, and `alpha_used` in scopes
+
+then use the `From Workspace` method.
+
+### Core Idea
+
+Treat the Excel file as a signal source only.
+
+Do **not** force the derivative block to use the Excel time step automatically.
+
+Instead:
+
+- replay `TAS_Torque`, `Motor_Input`, and `HwAngVel` using the Excel time vector
+- feed `Ts` into the Simulink derivative block as a separate constant-valued time series
+- feed `Tfilter` the same way
+
+This allows you to test:
+
+- same logged data
+- different chosen `Ts`
+- effect on `alpha_used`, `residual`, and `F0_live`
+
+### Signals to Feed From Workspace
+
+At minimum, prepare:
+
+- `TAS_Torque_sig`
+- `Motor_Input_sig`
+- `HwAngVel_Deg_s_sig`
+- `Ts_runtime_sig`
+- `Tfilter_runtime_sig`
+
+### Example MATLAB Preparation
+
+For a file such as `FC_constant_spd_test_low.XLS`:
+
+```matlab
+file = 'FC_constant_spd_test_low.XLS';
+raw = readtable(file, 'FileType', 'spreadsheet', 'ReadVariableNames', true, 'HeaderLines', 6);
+
+t = raw.("t[s]");
+tas = raw.("HwTrq_Nm_s16p10[]");
+motor = raw.("AimiCurrent[]");
+omega_deg_s = raw.("HwAngVel_Degs_s32p16[]");
+
+Ts_runtime = 0.002;
+Tfilter_runtime = 0.3;
+
+TAS_Torque_sig = timeseries(tas, t);
+Motor_Input_sig = timeseries(motor, t);
+HwAngVel_Deg_s_sig = timeseries(omega_deg_s, t);
+Ts_runtime_sig = timeseries(Ts_runtime * ones(size(t)), t);
+Tfilter_runtime_sig = timeseries(Tfilter_runtime * ones(size(t)), t);
+```
+
+### Simulink Connection Method
+
+At the model top level:
+
+1. replace the external source side with `From Workspace` blocks
+2. set their variable names to:
+   - `TAS_Torque_sig`
+   - `Motor_Input_sig`
+   - `HwAngVel_Deg_s_sig`
+   - `Ts_runtime_sig`
+   - `Tfilter_runtime_sig`
+3. connect them to the corresponding model inputs
+
+This means:
+
+- the signal values come from the Excel replay
+- the derivative block `Ts` is whatever you choose
+- the derivative block `Tfilter` is whatever you choose
+
+### What to Observe
+
+Use `Scope` or `Simulation Data Inspector` to watch:
+
+- `F0_live`
+- `residual`
+- `friction_hat`
+- `alpha_used`
+- optionally `update_enable`
+- optionally `freeze_active`
+
+### Recommended Comparison Experiment
+
+For one chosen file, run the same replay with multiple `Ts` values, for example:
+
+1. `Ts_runtime = median(diff(t))`
+2. `Ts_runtime = 0.01`
+3. `Ts_runtime = 0.1`
+
+Then compare:
+
+- whether `alpha_used` becomes noisy or unrealistic
+- whether `residual` becomes spike-heavy
+- whether `F0_live` drifts too aggressively
+
+This is a practical way to study how sensitive the online adaptation is to the derivative-block sampling assumption.
