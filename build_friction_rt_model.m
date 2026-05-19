@@ -15,6 +15,8 @@ function build_friction_rt_model(model_name)
 % - alpha is obtained from a filtered derivative block.
 % - J, A, v0, C1, omega_eps are constants in the initial model.
 % - F0 is updated slowly online by a MATLAB Function block.
+% - the adaptation does not use raw instantaneous residual directly; it uses
+%   a gated low-pass filtered error signal.
 %
 % Usage:
 %   build_friction_rt_model
@@ -42,7 +44,9 @@ add_parameter_constants(model_name, layout);
 add_signal_preprocess(model_name, layout);
 add_residual_calculation(model_name, layout);
 add_analytic_friction_model(model_name, layout);
+add_error_preprocess(model_name, layout);
 add_parameter_update(model_name, layout);
+add_f0_state(model_name, layout, '0.3');
 wire_top_level(model_name);
 
 Simulink.BlockDiagram.arrangeSystem(model_name);
@@ -68,7 +72,9 @@ layout.const_dy = 50;
 layout.pre_y = 40;
 layout.residual_y = 220;
 layout.friction_y = 420;
-layout.update_y = 620;
+layout.err_y = 620;
+layout.state_y = 760;
+layout.update_y = 900;
 
 layout.scope_x = 1180;
 layout.scope_y = 250;
@@ -92,15 +98,21 @@ add_block('simulink/Sinks/Out1', [model_name '/alpha_used'], ...
     'Position', [layout.out_x 120 layout.out_x+30 140]);
 add_block('simulink/Sinks/Out1', [model_name '/F0_live'], ...
     'Position', [layout.out_x 700 layout.out_x+30 720]);
+add_block('simulink/Sinks/Out1', [model_name '/e_slow'], ...
+    'Position', [layout.out_x 780 layout.out_x+30 800]);
+add_block('simulink/Sinks/Out1', [model_name '/update_enable'], ...
+    'Position', [layout.out_x 840 layout.out_x+30 860]);
 end
 
 function add_parameter_constants(model_name, layout)
 names = {'J_const','A_const','v0_const','C1_const','omega_eps_const', ...
-         'Ts_const','Tfilter_const','F0_init_const','mu_F0_const', ...
-         'F0_min_const','F0_max_const','omega_min_const','alpha_max_const'};
+         'Ts_const','Tfilter_const','mu_F0_const', ...
+         'F0_min_const','F0_max_const','omega_min_const','alpha_max_const', ...
+         'e_beta_const','e_clip_const'};
 values = {'0.01275','0.02','0.5','0.01','0.05', ...
-          '0.1','0.5','0.3','1e-4', ...
-          '0.05','2.0','0.05','20.0'};
+          '0.1','0.5','1e-4', ...
+          '0.05','2.0','0.05','20.0', ...
+          '0.05','1.0'};
 
 for i = 1:numel(names)
     y = layout.const0_y + (i-1) * layout.const_dy;
@@ -210,6 +222,40 @@ end
 add_line(sub, 'FrictionLaw/1', 'friction_hat/1');
 end
 
+function add_error_preprocess(model_name, layout)
+sub = [model_name '/Error_Preprocess'];
+add_block('simulink/Ports & Subsystems/Subsystem', sub, ...
+    'Position', [layout.sub_x layout.err_y layout.sub_x+360 layout.err_y+190]);
+
+open_system(sub);
+delete_default_contents(sub);
+
+inputs = {'residual','friction_hat','omega_used','alpha_used','omega_min','alpha_max','e_beta','e_clip'};
+for i = 1:numel(inputs)
+    y = 28 + (i-1) * 30;
+    add_block('simulink/Sources/In1', [sub '/' inputs{i}], ...
+        'Position', [30 y 60 y+20]);
+end
+
+add_block('simulink/User-Defined Functions/MATLAB Function', [sub '/FilterError'], ...
+    'Position', [120 45 310 250]);
+set_matlab_function_script([sub '/FilterError'], filter_error_code());
+
+add_block('simulink/Sinks/Out1', [sub '/e_raw'], ...
+    'Position', [360 78 390 98]);
+add_block('simulink/Sinks/Out1', [sub '/e_slow'], ...
+    'Position', [360 138 390 158]);
+add_block('simulink/Sinks/Out1', [sub '/update_enable'], ...
+    'Position', [360 198 390 218]);
+
+for i = 1:numel(inputs)
+    add_line(sub, [inputs{i} '/1'], ['FilterError/' num2str(i)]);
+end
+add_line(sub, 'FilterError/1', 'e_raw/1');
+add_line(sub, 'FilterError/2', 'e_slow/1');
+add_line(sub, 'FilterError/3', 'update_enable/1');
+end
+
 function add_parameter_update(model_name, layout)
 sub = [model_name '/Parameter_Update_Slow'];
 add_block('simulink/Ports & Subsystems/Subsystem', sub, ...
@@ -219,28 +265,47 @@ set_param(sub, 'TreatAsAtomicUnit', 'on');
 open_system(sub);
 delete_default_contents(sub);
 
-inputs = {'residual','friction_hat','omega_used','alpha_used','omega_eps', ...
-          'F0_prev','mu_F0','F0_min','F0_max','omega_min','alpha_max'};
+inputs = {'e_slow','omega_used','update_enable','omega_eps', ...
+          'F0_prev','mu_F0','F0_min','F0_max'};
 for i = 1:numel(inputs)
-    y = 28 + (i-1) * 34;
+    y = 28 + (i-1) * 36;
     add_block('simulink/Sources/In1', [sub '/' inputs{i}], ...
         'Position', [30 y 60 y+20]);
 end
 
 add_block('simulink/User-Defined Functions/MATLAB Function', [sub '/UpdateF0'], ...
-    'Position', [120 70 335 300]);
+    'Position', [120 55 335 240]);
 set_matlab_function_script([sub '/UpdateF0'], update_f0_code());
 
 add_block('simulink/Sinks/Out1', [sub '/F0_next'], ...
     'Position', [390 128 420 148]);
-add_block('simulink/Sinks/Out1', [sub '/update_enable'], ...
-    'Position', [390 198 420 218]);
 
 for i = 1:numel(inputs)
     add_line(sub, [inputs{i} '/1'], ['UpdateF0/' num2str(i)]);
 end
 add_line(sub, 'UpdateF0/1', 'F0_next/1');
-add_line(sub, 'UpdateF0/2', 'update_enable/1');
+end
+
+function add_f0_state(model_name, layout, f0_init_value)
+sub = [model_name '/F0_State'];
+add_block('simulink/Ports & Subsystems/Subsystem', sub, ...
+    'Position', [layout.sub_x layout.state_y layout.sub_x+280 layout.state_y+120]);
+set_param(sub, 'TreatAsAtomicUnit', 'on');
+
+open_system(sub);
+delete_default_contents(sub);
+
+add_block('simulink/Sources/In1', [sub '/F0_next'], ...
+    'Position', [30 38 60 58]);
+add_block('simulink/Discrete/Unit Delay', [sub '/F0_delay'], ...
+    'Position', [125 35 175 65], ...
+    'InitialCondition', f0_init_value);
+set_param([sub '/F0_delay'], 'ShowName', 'on');
+add_block('simulink/Sinks/Out1', [sub '/F0_live'], ...
+    'Position', [230 43 260 63]);
+
+add_line(sub, 'F0_next/1', 'F0_delay/1');
+add_line(sub, 'F0_delay/1', 'F0_live/1');
 end
 
 function wire_top_level(model_name)
@@ -255,38 +320,47 @@ add_line(model_name, 'TAS_Torque/1', 'Residual_Calculation/1');
 add_line(model_name, 'Motor_Input/1', 'Residual_Calculation/2');
 add_line(model_name, 'J_const/1', 'Residual_Calculation/4');
 
-add_line(model_name, 'F0_init_const/1', 'Parameter_Update_Slow/6');
-add_line(model_name, 'mu_F0_const/1', 'Parameter_Update_Slow/7');
-add_line(model_name, 'F0_min_const/1', 'Parameter_Update_Slow/8');
-add_line(model_name, 'F0_max_const/1', 'Parameter_Update_Slow/9');
-add_line(model_name, 'omega_min_const/1', 'Parameter_Update_Slow/10');
-add_line(model_name, 'alpha_max_const/1', 'Parameter_Update_Slow/11');
+add_line(model_name, 'Residual_Calculation/1', 'Error_Preprocess/1');
+add_line(model_name, 'Analytic_Friction_Model/1', 'Error_Preprocess/2');
+add_line(model_name, 'Signal_Preprocess/1', 'Error_Preprocess/3');
+add_line(model_name, 'Signal_Preprocess/2', 'Error_Preprocess/4');
+add_line(model_name, 'omega_min_const/1', 'Error_Preprocess/5');
+add_line(model_name, 'alpha_max_const/1', 'Error_Preprocess/6');
+add_line(model_name, 'e_beta_const/1', 'Error_Preprocess/7');
+add_line(model_name, 'e_clip_const/1', 'Error_Preprocess/8');
 
-add_line(model_name, 'Residual_Calculation/1', 'Parameter_Update_Slow/1');
-add_line(model_name, 'Signal_Preprocess/1', 'Parameter_Update_Slow/3');
-add_line(model_name, 'Signal_Preprocess/2', 'Parameter_Update_Slow/4');
-add_line(model_name, 'omega_eps_const/1', 'Parameter_Update_Slow/5');
+add_line(model_name, 'Error_Preprocess/2', 'Parameter_Update_Slow/1');
+add_line(model_name, 'Signal_Preprocess/1', 'Parameter_Update_Slow/2');
+add_line(model_name, 'Error_Preprocess/3', 'Parameter_Update_Slow/3');
+add_line(model_name, 'omega_eps_const/1', 'Parameter_Update_Slow/4');
+add_line(model_name, 'F0_State/1', 'Parameter_Update_Slow/5');
+add_line(model_name, 'mu_F0_const/1', 'Parameter_Update_Slow/6');
+add_line(model_name, 'F0_min_const/1', 'Parameter_Update_Slow/7');
+add_line(model_name, 'F0_max_const/1', 'Parameter_Update_Slow/8');
 
-add_line(model_name, 'Parameter_Update_Slow/1', 'Analytic_Friction_Model/2');
+add_line(model_name, 'Parameter_Update_Slow/1', 'F0_State/1');
+
+add_line(model_name, 'F0_State/1', 'Analytic_Friction_Model/2');
 add_line(model_name, 'A_const/1', 'Analytic_Friction_Model/3');
 add_line(model_name, 'v0_const/1', 'Analytic_Friction_Model/4');
 add_line(model_name, 'C1_const/1', 'Analytic_Friction_Model/5');
 add_line(model_name, 'omega_eps_const/1', 'Analytic_Friction_Model/6');
 
-add_line(model_name, 'Analytic_Friction_Model/1', 'Parameter_Update_Slow/2');
-
 add_line(model_name, 'Analytic_Friction_Model/1', 'friction_hat/1');
 add_line(model_name, 'Residual_Calculation/1', 'residual/1');
 add_line(model_name, 'Signal_Preprocess/2', 'alpha_used/1');
-add_line(model_name, 'Parameter_Update_Slow/1', 'F0_live/1');
+add_line(model_name, 'F0_State/1', 'F0_live/1');
+add_line(model_name, 'Error_Preprocess/2', 'e_slow/1');
+add_line(model_name, 'Error_Preprocess/3', 'update_enable/1');
 
 add_block('simulink/Sinks/Scope', [model_name '/DiagnosticsScope'], ...
     'Position', [1180 250 1210 330], ...
-    'NumInputPorts', '4');
+    'NumInputPorts', '5');
 add_line(model_name, 'Signal_Preprocess/1', 'DiagnosticsScope/1');
 add_line(model_name, 'Signal_Preprocess/2', 'DiagnosticsScope/2');
 add_line(model_name, 'Residual_Calculation/1', 'DiagnosticsScope/3');
 add_line(model_name, 'Analytic_Friction_Model/1', 'DiagnosticsScope/4');
+add_line(model_name, 'Error_Preprocess/2', 'DiagnosticsScope/5');
 end
 
 function delete_default_contents(sub)
@@ -343,20 +417,42 @@ end
 
 function code = update_f0_code()
 code = [ ...
-"function [F0_next, update_enable] = fcn(residual, friction_hat, omega, alpha, omega_eps, F0_prev, mu_F0, F0_min, F0_max, omega_min, alpha_max)" newline ...
-"% First-pass slow adaptation of F0 only." newline ...
-"% e = residual - friction_hat" newline ...
-"% F0_next = sat(F0_prev + mu_F0 * e * tanh(omega/omega_eps))" newline ...
-"e = residual - friction_hat;" newline ...
+"function F0_next = fcn(e_slow, omega, update_enable, omega_eps, F0_prev, mu_F0, F0_min, F0_max)" newline ...
+"% Slow F0 adaptation using a filtered error instead of raw instantaneous residual." newline ...
 "s = tanh(omega / max(omega_eps, 1e-6));" newline ...
-"update_enable = (abs(omega) > omega_min) && (abs(alpha) < alpha_max);" newline ...
 "F0_next = F0_prev;" newline ...
 "if update_enable" newline ...
-"    F0_next = F0_prev + mu_F0 * e * s;" newline ...
+"    F0_next = F0_prev + mu_F0 * e_slow * s;" newline ...
 "end" newline ...
 "if F0_next < F0_min" newline ...
 "    F0_next = F0_min;" newline ...
 "elseif F0_next > F0_max" newline ...
 "    F0_next = F0_max;" newline ...
 "end" newline];
+end
+
+function code = filter_error_code()
+code = [ ...
+"function [e_raw, e_slow, update_enable] = fcn(residual, friction_hat, omega, alpha, omega_min, alpha_max, e_beta, e_clip)" newline ...
+"% Build a more reliable adaptation error than raw instantaneous residual." newline ...
+"% 1) compute e_raw = residual - friction_hat" newline ...
+"% 2) gate updates to trusted regions" newline ...
+"% 3) clip and low-pass the error for slow adaptation" newline ...
+"persistent e_prev" newline ...
+"if isempty(e_prev)" newline ...
+"    e_prev = 0.0;" newline ...
+"end" newline ...
+"e_raw = residual - friction_hat;" newline ...
+"update_enable = (abs(omega) > omega_min) && (abs(alpha) < alpha_max);" newline ...
+"e_used = e_raw;" newline ...
+"if e_used > e_clip" newline ...
+"    e_used = e_clip;" newline ...
+"elseif e_used < -e_clip" newline ...
+"    e_used = -e_clip;" newline ...
+"end" newline ...
+"if update_enable" newline ...
+"    beta = min(max(e_beta, 0.0), 1.0);" newline ...
+"    e_prev = (1.0 - beta) * e_prev + beta * e_used;" newline ...
+"end" newline ...
+"e_slow = e_prev;" newline];
 end

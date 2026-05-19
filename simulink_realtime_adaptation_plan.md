@@ -33,20 +33,20 @@ Create these top-level subsystems:
 1. `Signal_Preprocess`
 2. `Residual_Calculation`
 3. `Analytic_Friction_Model`
-4. `Parameter_Update_Slow`
+4. `Error_Preprocess`
+5. `F0_State`
+6. `Parameter_Update_Slow`
 
 Suggested signal flow:
 
 ```text
 TAS_Torque ----\
-Motor_Input ----> Residual_Calculation ----> residual ----\
-omega ---------/                                      |    \
-alpha -----------------------------------------------/      \
-                                                             > compare / update
-omega ------------------------------------------------------> Analytic_Friction_Model --> friction_hat
-                                                                                   ^
-                                                                                   |
-                                                               Parameter_Update_Slow|
+Motor_Input ----> Residual_Calculation ----> residual ------\
+alpha -----------------------------------------------\       \
+omega ----------------------------------------------- Error_Preprocess ---> e_slow ---> Parameter_Update_Slow ---> F0_next ---> F0_State ---> F0_live
+                                                          \                                              ^                             |
+                                                           \--> update_enable -----------------------------/                             |
+omega ------------------------------------------------------------------------------------------------------> Analytic_Friction_Model ----/
 ```
 
 ## 1. Signal_Preprocess
@@ -177,7 +177,82 @@ F0 --------------------/
 s * mag --> friction_hat
 ```
 
-## 4. Parameter_Update_Slow
+## 4. Error_Preprocess
+
+This block turns the raw residual mismatch into a more reliable adaptation signal.
+
+### Why This Block Is Needed
+
+Do not use instantaneous `residual - friction_hat` directly for adaptation.
+
+That signal can be corrupted by:
+
+- alpha-estimation noise
+- sensor spikes
+- direction-change transients
+- motor-side mapping mismatch
+- unmodeled dynamics
+
+### Inputs
+
+- `residual`
+- `friction_hat`
+- `omega_used`
+- `alpha_used`
+- `omega_min`
+- `alpha_max`
+- `e_beta`
+- `e_clip`
+
+### Outputs
+
+- `e_raw`
+- `e_slow`
+- `update_enable`
+
+### Recommended Logic
+
+```text
+e_raw = residual - friction_hat
+update_enable = (abs(omega) > omega_min) and (abs(alpha) < alpha_max)
+e_used = clip(e_raw, -e_clip, e_clip)
+
+if update_enable:
+    e_slow[k] = (1 - beta) * e_slow[k-1] + beta * e_used
+else
+    e_slow[k] = e_slow[k-1]
+```
+
+This makes the adaptation error:
+
+- gated
+- clipped
+- low-pass filtered
+
+## 5. F0_State
+
+Store the current live value of `F0` as a state.
+
+### Inputs
+
+- `F0_next`
+- `F0_init`
+
+### Output
+
+- `F0_live`
+
+### Recommended Simulink Block
+
+- `Unit Delay`
+
+This closes the online adaptation loop:
+
+```text
+F0_live -> friction model -> e_slow -> F0_next -> Unit Delay -> F0_live
+```
+
+## 6. Parameter_Update_Slow
 
 This is the online adaptation block.
 
@@ -204,8 +279,7 @@ Only later consider updating `A`.
 
 ### Inputs
 
-- `residual`
-- `friction_hat`
+- `e_slow`
 - `omega_used`
 - `update_enable`
 - `F0_old`
@@ -213,12 +287,6 @@ Only later consider updating `A`.
 ### Output
 
 - `F0_new`
-
-### Error
-
-```text
-e = residual - friction_hat
-```
 
 ### Gradient with Respect to `F0`
 
@@ -237,13 +305,14 @@ dF/dF0 = s
 ### Update Rule
 
 ```text
-F0_new = sat(F0_old + mu_F0 * e * s)
+F0_new = sat(F0_old + mu_F0 * e_slow * s)
 ```
 
 Where:
 
 - `mu_F0` is a small update gain
 - `sat` is a parameter saturation / clamp
+- `e_slow` is the gated and filtered adaptation error
 
 If update is disabled:
 
@@ -251,7 +320,7 @@ If update is disabled:
 F0_new = F0_old
 ```
 
-## 4B. Next Step: Update `F0` and `C1`
+## 6B. Next Step: Update `F0` and `C1`
 
 Because:
 
@@ -266,11 +335,11 @@ dF/dF0 = s
 dF/dC1 = s * absw
 ```
 
-So:
+So, using the same `e_slow`:
 
 ```text
-F0_new = sat(F0_old + mu_F0 * e * s)
-C1_new = sat(C1_old + mu_C1 * e * s * absw)
+F0_new = sat(F0_old + mu_F0 * e_slow * s)
+C1_new = sat(C1_old + mu_C1 * e_slow * s * absw)
 ```
 
 ## Update_Enable Gating
@@ -282,7 +351,6 @@ Do **not** update parameters at every sample without conditions.
 ```text
 abs(omega) > omega_min
 and abs(alpha) < alpha_max
-and abs(residual) < residual_max
 ```
 
 ### Simulink Implementation
@@ -305,7 +373,7 @@ to store the previous parameter value.
 Example for `F0`:
 
 ```text
-F0_old --> update law --> Saturation --> Unit Delay --> F0_old(next)
+F0_live --> update law --> Saturation --> Unit Delay --> F0_live(next)
 ```
 
 ## Slow Update Rate
@@ -349,7 +417,8 @@ If the requirement is to produce something quickly in Simulink:
 - `alpha_used = filtered derivative(omega_used)`
 - `residual = TAS - 0.5*motor - J*alpha`
 - `friction_hat = tanh(...) * (...)`
-- online update only `F0`
+- `e_slow = gated + clipped + low-pass filtered (residual - friction_hat)`
+- online update only `F0` using `e_slow`
 - fixed `A`, `v0`, `C1`, `omega_eps`
 - add `update_enable`
 - add parameter saturation
@@ -365,15 +434,16 @@ This already demonstrates:
 
 ```text
 [Measured Omega deg/s] --> [Gain pi/180] --> omega_used -->+--> [Analytic_Friction_Model] --> friction_hat
-                                                           |
-                                                           +--> [Filtered Derivative] --> alpha_used --> [Gain J] --\
-                                                                                                                      \
-[TAS_Torque] -----------------------------------------------------------------------------------------------> [Sum] --> residual
-[Motor_Input] --> [Gain 0.5] -------------------------------------------------------------------------------/
+                                                           |                                      ^
+                                                           |                                      |
+                                                           +--> [Filtered Derivative] --> alpha --+ 
+                                                                                                  |
+[TAS_Torque] ---------------------------------------------------------------------------------> [Residual_Calculation] --> residual
+[Motor_Input] --> [Gain 0.5] -----------------------------------------------------------------/
 
-residual + friction_hat + omega_used --> [Parameter_Update_Slow] --> F0 (and later C1)
+residual + friction_hat + omega + alpha --> [Error_Preprocess] --> e_slow --> [Parameter_Update_Slow] --> F0_next --> [F0_State] --> F0_live
 
-F0, A, v0, C1, omega_eps --> [Analytic_Friction_Model]
+F0_live, A, v0, C1, omega_eps --> [Analytic_Friction_Model]
 ```
 
 ## Recommended Next Step
@@ -384,6 +454,7 @@ Implement the first Simulink version with:
 - fixed `J`
 - fixed `A`, `v0`, `C1`, `omega_eps`
 - online update of `F0` only
+- do not adapt on raw instantaneous residual
 
 Once that behaves well:
 
