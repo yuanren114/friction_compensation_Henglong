@@ -498,7 +498,11 @@ At minimum, prepare:
 
 - `TAS_Torque_sig`
 - `Motor_Input_sig`
-- `HwAngVel_Deg_s_sig`
+- `Angle_sig`
+- `Omega_sig`
+- `Torque_Hand_sig`
+- `Torque_Motor_sig`
+- `AimiCurrent_sig`
 - `Ts_runtime_sig`
 - `Tfilter_runtime_sig`
 
@@ -511,16 +515,20 @@ file = 'FC_constant_spd_test_low.XLS';
 raw = readtable(file, 'FileType', 'spreadsheet', 'ReadVariableNames', true, 'HeaderLines', 6);
 
 t = raw.("t[s]");
-tas = raw.("HwTrq_Nm_s16p10[]");
-motor = raw.("AimiCurrent[]");
-omega_deg_s = raw.("HwAngVel_Degs_s32p16[]");
+angle = raw.("HwAng_Deg_s32p16[]");
+omega = raw.("HwAngVel_Degs_s32p16[]");
+torque_hand = raw.("HwTrq_Nm_s16p10[]");
+torque_motor = 0.5 * raw.("AimiCurrent[]");  % optional replay helper
+AimiCurrent = raw.("AimiCurrent[]");
 
 Ts_runtime = 0.002;
 Tfilter_runtime = 0.3;
 
-TAS_Torque_sig = timeseries(tas, t);
-Motor_Input_sig = timeseries(motor, t);
-HwAngVel_Deg_s_sig = timeseries(omega_deg_s, t);
+Angle_sig = timeseries(angle, t);
+Omega_sig = timeseries(omega, t);
+Torque_Hand_sig = timeseries(torque_hand, t);
+Torque_Motor_sig = timeseries(torque_motor, t);
+AimiCurrent_sig = timeseries(AimiCurrent, t);
 Ts_runtime_sig = timeseries(Ts_runtime * ones(size(t)), t);
 Tfilter_runtime_sig = timeseries(Tfilter_runtime * ones(size(t)), t);
 ```
@@ -531,12 +539,27 @@ At the model top level:
 
 1. replace the external source side with `From Workspace` blocks
 2. set their variable names to:
-   - `TAS_Torque_sig`
-   - `Motor_Input_sig`
-   - `HwAngVel_Deg_s_sig`
+   - `Angle_sig`
+   - `Omega_sig`
+   - `Torque_Hand_sig`
+   - `Torque_Motor_sig`
+   - `AimiCurrent_sig`
    - `Ts_runtime_sig`
    - `Tfilter_runtime_sig`
-3. connect them to the corresponding model inputs
+3. connect them to the corresponding places in the model
+
+Recommended mapping for the current online model:
+
+- `Torque_Hand_sig` -> top-level `TAS_Torque`
+- `AimiCurrent_sig` -> top-level `Motor_Input`
+- `Omega_sig` -> top-level `HwAngVel_Deg_s`
+- `Ts_runtime_sig` -> `Signal_Preprocess/Ts`
+- `Tfilter_runtime_sig` -> `Signal_Preprocess/Tfilter`
+
+The remaining helper signals are optional monitors / future hooks:
+
+- `Angle_sig` is useful if you later add angle-based logic or want a replay reference
+- `Torque_Motor_sig` is useful if you want to monitor the already-halved motor-side contribution separately from `AimiCurrent_sig`
 
 This means:
 
