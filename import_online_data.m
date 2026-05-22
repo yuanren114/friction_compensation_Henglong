@@ -10,8 +10,8 @@ AimiCurrent = raw.("AimiCurrent__");
 torque_motor = raw.("ElectricMotorTorque__");
 
 
-Ts_runtime = 0.01;
-Tfilter_runtime = 0.1;
+Ts_runtime = 0.05;
+Tfilter_runtime = 0.25;
 
 Angle_sig = timeseries(angle, t);
 Omega_sig = timeseries(omega, t);
